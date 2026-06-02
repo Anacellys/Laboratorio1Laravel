@@ -11,6 +11,8 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use PragmaRX\Google2FA\Google2FA;
 use OTPHP\TOTP;
+use Endroid\QrCode\QrCode;
+use Endroid\QrCode\Writer\PngWriter;
 
 #[Fillable(['name', 'email', 'password', 'two_factor_secret', 'two_factor_enabled'])]
 #[Hidden(['password', 'remember_token', 'two_factor_secret'])]
@@ -44,7 +46,7 @@ class User extends Authenticatable
         $totp = TOTP::create();
         $secret = $totp->getSecret();
 
-        // Guardar el secret encriptado en la base de datos
+        // Guardar el secret en la base de datos
         $this->two_factor_secret = $secret;
         $this->save();
 
@@ -54,7 +56,7 @@ class User extends Authenticatable
     /**
      * Obtiene la URL de Google Authenticator con el QR code
      *
-     * @return string URL para generar el QR code
+     * @return string URL para generar el QR code en data URI
      */
     public function getTwoFactorQrCodeUrl(): string
     {
@@ -62,11 +64,24 @@ class User extends Authenticatable
             $this->generateTwoFactorSecret();
         }
 
+        // Construir URL para Google Authenticator
         $totp = TOTP::create($this->two_factor_secret);
         $totp->setLabel($this->email);
         $totp->setIssuer(config('app.name'));
 
-        return $totp->getQrCode()->toDataURI();
+        // Obtener la URL otpauth://
+        $qrUrl = $totp->getProvisioningUri();
+
+        // Generar QR code usando endroid/qr-code
+        $qrCode = QrCode::create($qrUrl)
+            ->setSize(300)
+            ->setMargin(10);
+
+        $writer = new PngWriter();
+        $result = $writer->write($qrCode);
+
+        // Retornar como data URI
+        return 'data:image/png;base64,' . base64_encode($result->getString());
     }
 
     /**
@@ -134,4 +149,5 @@ class User extends Authenticatable
         return $this->two_factor_enabled ?? false;
     }
 }
+
 
