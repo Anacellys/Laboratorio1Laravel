@@ -65,6 +65,14 @@ return [
             'replace_placeholders' => true,
         ],
 
+        'audit' => [
+            // Canal dedicado para registro, login, errores de autenticacion y errores 2FA.
+            'driver' => 'single',
+            'path' => storage_path('logs/audit.log'),
+            'level' => 'info',
+            'replace_placeholders' => true,
+        ],
+
         'daily' => [
             'driver' => 'daily',
             'path' => storage_path('logs/laravel.log'),

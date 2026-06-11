@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
 use App\Services\AuditLogService;
 use Illuminate\Foundation\Auth\AuthenticatesUsers;
 use Illuminate\Http\Request;
@@ -10,115 +11,106 @@ use Illuminate\Support\Facades\Auth;
 
 class LoginController extends Controller
 {
-    /*
-    |--------------------------------------------------------------------------
-    | Login Controller
-    |--------------------------------------------------------------------------
-    |
-    | This controller handles authenticating users for the application and
-    | redirecting them to your home screen. The controller uses a trait
-    | to conveniently provide its functionality to your applications.
-    |
-    */
-
     use AuthenticatesUsers;
 
     /**
-     * Where to redirect users after login.
-     *
-     * @var string
+     * Ruta final cuando usuario, contrasena y 2FA son correctos.
      */
     protected $redirectTo = '/home';
 
-    /**
-     * Servicio de logs de auditoría
-     */
-    protected AuditLogService $auditLog;
-
-    /**
-     * Create a new controller instance.
-     *
-     * @return void
-     */
-    public function __construct(AuditLogService $auditLog)
+    public function __construct(private readonly AuditLogService $auditLog)
     {
         $this->middleware('guest')->except('logout');
         $this->middleware('auth')->only('logout');
-        $this->auditLog = $auditLog;
     }
 
     /**
-     * Handle a login request to the application.
-     *
-     * Intercepta el login para verificar 2FA
-     *
-     * @param  \Illuminate\Http\Request  $request
-     * @return \Illuminate\Http\RedirectResponse|\Illuminate\Http\Response|\Illuminate\Http\JsonResponse
+     * Laravel usara el campo correo como identificador principal.
+     */
+    public function username(): string
+    {
+        return 'correo';
+    }
+
+    /**
+     * Reglas de validacion del primer paso de login.
+     */
+    protected function validateLogin(Request $request): void
+    {
+        $request->validate([
+            'correo' => ['required', 'email'],
+            'password' => ['required', 'string'],
+        ]);
+    }
+
+    /**
+     * Valida correo y contrasena; si son correctos exige la pantalla 2FA.
      */
     public function login(Request $request)
     {
         $this->validateLogin($request);
 
-        // Si hay demasiados intentos de login fallidos, bloquear
-        if (method_exists($this, 'hasTooManyLoginAttempts') &&
-            $this->hasTooManyLoginAttempts($request)) {
+        if (method_exists($this, 'hasTooManyLoginAttempts') && $this->hasTooManyLoginAttempts($request)) {
             $this->fireLockoutEvent($request);
+
             return $this->sendLockoutResponse($request);
         }
 
-        // Obtener usuario por email
-        $user = \App\Models\User::where('email', $request->email)->first();
+        $user = User::where('correo', $request->correo)->first();
 
-        // Si no existe o contraseña es incorrecta
-        if (!$user || !\Hash::check($request->password, $user->password)) {
-            $this->auditLog->logLoginFailed(
-                $request->email,
-                'invalid_credentials'
-            );
-
+        if (!$user || !password_verify($request->password, $user->HashMagic)) {
+            $this->auditLog->logLoginFailed($request->correo, 'invalid_credentials');
             $this->incrementLoginAttempts($request);
+
             return $this->sendFailedLoginResponse($request);
         }
 
-        // Si el usuario tiene 2FA habilitado
-        if ($user->hasTwoFactorEnabled()) {
-            // Crear sesión temporal para 2FA
-            session()->put('2fa_user_id', $user->id);
-            session()->put('2fa_email', $user->email);
+        session()->put('2fa_user_id', $user->getKey());
+        session()->put('2fa_remember', (bool) $request->boolean('remember'));
 
-            $this->auditLog->log(
-                AuditLogService::EVENT_LOGIN_SUCCESS,
-                ['status' => 'pending_2fa'],
-                (string)$user->id
-            );
+        $this->auditLog->log(
+            AuditLogService::EVENT_LOGIN_SUCCESS,
+            ['status' => 'password_ok_pending_2fa', 'email' => $user->correo],
+            (string) $user->getKey()
+        );
 
-            // Redirigir a pantalla de verificación 2FA
-            return redirect()->route('two-factor.verify')
-                ->with('info', 'Por favor, ingresa tu código de autenticación de dos factores.');
-        }
-
-        // Si no tiene 2FA, completar login normal
-        Auth::login($user, $request->remember);
-        $this->clearLoginAttempts($request);
-
-        $this->auditLog->logLoginSuccess($user->email, $user->id);
-
-        return $this->sendLoginResponse($request);
+        return redirect()->route('two-factor.verify')
+            ->with('info', 'Ingresa el codigo de Google Authenticator para completar el acceso.');
     }
 
     /**
-     * Handle a failed login attempt.
-     *
-     * @param  \Illuminate\Http\Request  $request
-     * @return \Illuminate\Http\RedirectResponse
+     * Mensaje cuando falla correo o contrasena.
      */
     protected function sendFailedLoginResponse(Request $request)
     {
         return redirect()->back()
-            ->withInput($request->only($this->username(), 'remember'))
+            ->withInput($request->only('correo', 'remember'))
             ->withErrors([
-                $this->username() => trans('auth.failed'),
+                'correo' => trans('auth.failed'),
             ]);
     }
-}
 
+    /**
+     * Registra cierre de sesion en el log de auditoria.
+     */
+    public function logout(Request $request)
+    {
+        if (Auth::check()) {
+            $this->auditLog->logLogout(Auth::id());
+        }
+
+        return $this->traitLogout($request);
+    }
+
+    /**
+     * Alias para invocar el logout del trait sin perder auditoria.
+     */
+    private function traitLogout(Request $request)
+    {
+        Auth::logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+
+        return redirect('/');
+    }
+}

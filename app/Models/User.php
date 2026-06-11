@@ -2,152 +2,138 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Database\Factories\UserFactory;
-use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
-use PragmaRX\Google2FA\Google2FA;
-use OTPHP\TOTP;
-use Endroid\QrCode\QrCode;
-use Endroid\QrCode\Writer\PngWriter;
+use Sonata\GoogleAuthenticator\GoogleAuthenticator;
+use Sonata\GoogleAuthenticator\GoogleQrUrl;
 
-#[Fillable(['name', 'email', 'password', 'two_factor_secret', 'two_factor_enabled'])]
-#[Hidden(['password', 'remember_token', 'two_factor_secret'])]
+#[Hidden(['HashMagic', 'remember_token', 'secret_2fa'])]
 class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable;
 
     /**
-     * Get the attributes that should be cast.
+     * La tabla y llave primaria usan los nombres solicitados por el enunciado.
+     */
+    protected $table = 'usuarios';
+    protected $primaryKey = 'id_usuario';
+
+    /**
+     * Campos que se pueden asignar masivamente desde el registro.
+     */
+    protected $fillable = [
+        'nombre',
+        'apellido',
+        'correo',
+        'HashMagic',
+        'sexo',
+        'secret_2fa',
+        'two_factor_enabled',
+        'two_factor_confirmed_at',
+    ];
+
+    /**
+     * Laravel debe leer HashMagic como columna real de contrasena.
+     */
+    public function getAuthPasswordName(): string
+    {
+        return 'HashMagic';
+    }
+
+    /**
+     * Compatibilidad con el proveedor de autenticacion de Laravel.
+     */
+    public function getAuthPassword(): string
+    {
+        return (string) $this->HashMagic;
+    }
+
+    /**
+     * Muestra un nombre legible en la barra de navegacion.
+     */
+    public function getNameAttribute(): string
+    {
+        return trim($this->nombre . ' ' . $this->apellido);
+    }
+
+    /**
+     * Expone email como alias de correo para componentes Laravel existentes.
+     */
+    public function getEmailAttribute(): string
+    {
+        return (string) $this->correo;
+    }
+
+    /**
+     * Casts de fechas y banderas.
      *
      * @return array<string, string>
      */
     protected function casts(): array
     {
         return [
-            'email_verified_at' => 'datetime',
-            'password' => 'hashed',
             'two_factor_enabled' => 'boolean',
             'two_factor_confirmed_at' => 'datetime',
         ];
     }
 
     /**
-     * Genera un nuevo secret TOTP para 2FA
-     *
-     * @return string Secret en formato Base32
+     * Genera y guarda un secret Base32 compatible con Google Authenticator.
      */
     public function generateTwoFactorSecret(): string
     {
-        $totp = TOTP::create();
-        $secret = $totp->getSecret();
+        $secret = (new GoogleAuthenticator())->generateSecret();
 
-        // Guardar el secret en la base de datos
-        $this->two_factor_secret = $secret;
+        $this->secret_2fa = $secret;
         $this->save();
 
         return $secret;
     }
 
     /**
-     * Obtiene la URL de Google Authenticator con el QR code
-     *
-     * @return string URL para generar el QR code en data URI
+     * Crea la URL de QR con GoogleQrUrl de Sonata.
      */
     public function getTwoFactorQrCodeUrl(): string
     {
-        if (!$this->two_factor_secret) {
+        if (!$this->secret_2fa) {
             $this->generateTwoFactorSecret();
         }
 
-        // Construir URL para Google Authenticator
-        $totp = TOTP::create($this->two_factor_secret);
-        $totp->setLabel($this->email);
-        $totp->setIssuer(config('app.name'));
-
-        // Obtener la URL otpauth://
-        $qrUrl = $totp->getProvisioningUri();
-
-        // Generar QR code usando endroid/qr-code
-        $qrCode = QrCode::create($qrUrl)
-            ->setSize(300)
-            ->setMargin(10);
-
-        $writer = new PngWriter();
-        $result = $writer->write($qrCode);
-
-        // Retornar como data URI
-        return 'data:image/png;base64,' . base64_encode($result->getString());
+        return GoogleQrUrl::generate($this->correo, $this->secret_2fa, config('app.name', 'AutenticacionLab'), 250);
     }
 
     /**
-     * Valida un código TOTP ingresado por el usuario
-     *
-     * @param string $code Código de 6 dígitos ingresado por el usuario
-     * @param int $discrepancy Margen de tiempo permitido (ventanas de 30 segundos)
-     * @return bool True si el código es válido
+     * Valida el codigo temporal de seis digitos contra el secret guardado.
      */
     public function validateTwoFactorCode(string $code, int $discrepancy = 1): bool
     {
-        if (!$this->two_factor_secret || !$this->two_factor_enabled) {
+        if (!$this->secret_2fa) {
             return false;
         }
 
-        try {
-            $totp = TOTP::create($this->two_factor_secret);
-
-            // Verificar si el código es válido dentro del margen de tiempo
-            return $totp->verify($code, time(), $discrepancy);
-        } catch (\Exception $e) {
-            return false;
-        }
+        return (new GoogleAuthenticator())->checkCode($this->secret_2fa, $code, $discrepancy);
     }
 
     /**
-     * Habilita 2FA para el usuario después de validar el código
-     *
-     * @param string $code Código TOTP a validar
-     * @return bool True si se habilitó correctamente
+     * Indica si el usuario ya confirmo 2FA.
      */
-    public function enableTwoFactor(string $code): bool
+    public function hasTwoFactorEnabled(): bool
     {
-        if ($this->validateTwoFactorCode($code)) {
-            $this->two_factor_enabled = true;
-            $this->two_factor_confirmed_at = now();
-            $this->save();
-
-            return true;
-        }
-
-        return false;
+        return (bool) $this->two_factor_enabled;
     }
 
     /**
-     * Deshabilita 2FA para el usuario
-     *
-     * @return void
+     * Limpia la configuracion 2FA del usuario.
      */
     public function disableTwoFactor(): void
     {
         $this->two_factor_enabled = false;
-        $this->two_factor_secret = null;
+        $this->secret_2fa = $this->generateTwoFactorSecret();
         $this->two_factor_confirmed_at = null;
         $this->save();
     }
-
-    /**
-     * Verifica si el usuario tiene 2FA habilitado
-     *
-     * @return bool
-     */
-    public function hasTwoFactorEnabled(): bool
-    {
-        return $this->two_factor_enabled ?? false;
-    }
 }
-
-

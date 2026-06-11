@@ -66,7 +66,8 @@ class AuditLogService
 
         // Obtener ID del usuario autenticado si no se proporciona
         if (!$userId && auth()->check()) {
-            $userId = auth()->user()->id;
+            // auth()->id() respeta la llave primaria personalizada id_usuario.
+            $userId = auth()->id();
         }
 
         // Construir mensaje de log estructurado
